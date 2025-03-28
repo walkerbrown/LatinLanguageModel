@@ -1,0 +1,7 @@
+accelerate
+argparse
+coremltools
+nltk
+numpy
+torch
+transformers
