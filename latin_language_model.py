@@ -107,15 +107,15 @@ def clean_latin_corpus(input_path, output_path):
 
 # 1. Train or fine-tune the model
 def train_latin_model(corpus_path, output_dir):
-    # Initialize tokenizer and model (using a small model like GPT-2 small)
+    # Initialize tokenizer and model (using a tiny model for better compatibility)
     tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
     model = AutoModelForCausalLM.from_pretrained("distilgpt2")
     
-    # Create dataset
+    # Create dataset with smaller block size
     dataset = TextDataset(
         tokenizer=tokenizer,
         file_path=corpus_path,
-        block_size=128,
+        block_size=64,  # Reduced block size for memory efficiency
     )
     
     data_collator = DataCollatorForLanguageModeling(
@@ -123,15 +123,16 @@ def train_latin_model(corpus_path, output_dir):
         mlm=False,
     )
     
-    # Set up training arguments
+    # Set up training arguments with smaller batch size and gradient accumulation
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
         num_train_epochs=4,
-        per_device_train_batch_size=8,
-        save_steps=10_000,
+        per_device_train_batch_size=4,  # Smaller batch size
+        gradient_accumulation_steps=2,  # Accumulate gradients
+        save_steps=5_000,
         save_total_limit=2,
-    )
+ )
     
     # Initialize trainer
     trainer = Trainer(
@@ -161,18 +162,17 @@ def optimize_model(model_path):
     model = AutoModelForCausalLM.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     
-    # Quantize the model to reduce size
-    # This uses dynamic quantization
-    quantized_model = torch.quantization.quantize_dynamic(
-        model, 
-        {nn.Linear}, 
-        dtype=torch.qint8
-    )
+    # Instead of quantization which may cause issues with CoreML conversion,
+    # just return the model directly for now
+    print("Skipping quantization to ensure CoreML compatibility")
     
-    # Save quantized model
+    # Still create the directory structure for consistency
     quantized_path = f"{model_path}_quantized"
     os.makedirs(quantized_path, exist_ok=True)
-    quantized_model.save_pretrained(quantized_path)
+    
+    # Save model in the quantized directory
+    model.save_pretrained(quantized_path)
+    tokenizer.save_pretrained(quantized_path)
     
     # Copy vocabulary file to quantized directory
     vocab_src = os.path.join(model_path, "latin_vocab.json")
@@ -181,17 +181,17 @@ def optimize_model(model_path):
         import shutil
         shutil.copy(vocab_src, vocab_dst)
     
-    return quantized_model, tokenizer
+    return model, tokenizer
 
 # 3. Export to CoreML format
 def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer"):
     # Create output directory if it doesn't exist
     os.makedirs(output_path, exist_ok=True)
     
-    # Create a simple input example
-    input_ids = tokenizer.encode("Lorem ipsum dolor sit", return_tensors="pt")
+    # Create a shorter input example to reduce model complexity
+    input_ids = tokenizer.encode("Lorem ipsum", return_tensors="pt")
     
-    # Define the function to trace
+    # Define a simple next token prediction function
     def model_prediction(x):
         with torch.no_grad():
             # Get logits from the model
@@ -203,7 +203,7 @@ def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer
     
     print(f"Tracing model with input shape: {input_ids.shape}")
     
-    # Trace the model
+    # Trace the model - use torch.jit.trace for better compatibility
     traced_model = torch.jit.trace(model_prediction, input_ids)
     
     print("Converting to CoreML format...")
@@ -211,8 +211,9 @@ def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer
     # Convert to CoreML
     mlmodel = ct.convert(
         traced_model,
-        inputs=[ct.TensorType(name="input", shape=input_ids.shape, dtype=np.int32)],
-        compute_units=ct.ComputeUnit.CPU_AND_NE  # Use Neural Engine if available
+        inputs=[ct.TensorType(name="input", shape=input_ids.shape)],
+        compute_precision=ct.precision.FLOAT16,
+        compute_units=ct.ComputeUnit.CPU_AND_GPU  # Use GPU instead of Neural Engine for better compatibility
     )
     
     # Set model metadata
