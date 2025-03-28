@@ -1,3 +1,7 @@
+# Set environment variables to prevent tokenizer parallelism issues
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -9,7 +13,6 @@ import coremltools as ct
 import json
 import numpy as np
 import re
-import os
 import argparse
 import unicodedata
 from collections import Counter
@@ -223,35 +226,155 @@ def train_latin_model(corpus_path, output_dir, block_size=128, force_cpu=False):
             print("Falling back to CPU")
             device = "cpu"
     
+    # Function to chunk corpus into token-sized pieces
+    def chunk_corpus_by_tokens(corpus_path, output_dir, tokenizer, max_tokens=900):
+        """
+        Split corpus into chunks based on token count to stay under the 1024 token limit
+        Returns a list of paths to chunk files
+        """
+        print(f"Checking if corpus needs chunking by token count...")
+        
+        # Create chunk directory
+        chunks_dir = os.path.join(output_dir, "corpus_chunks")
+        os.makedirs(chunks_dir, exist_ok=True)
+        
+        # Read the corpus
+        with open(corpus_path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+        
+        # Tokenize the entire corpus to get total token count
+        all_tokens = tokenizer.encode(text)
+        total_tokens = len(all_tokens)
+        
+        print(f"Total corpus size: {total_tokens} tokens")
+        
+        # If under token limit, just return the original path
+        if total_tokens <= max_tokens:
+            print(f"Corpus fits within token limit ({total_tokens} tokens), no chunking needed")
+            return [corpus_path]
+            
+        print(f"Corpus exceeds token limit, splitting into chunks of max {max_tokens} tokens")
+        
+        # Split the text into sentences for cleaner chunks
+        import re
+        # Match sentences ending with period, question mark, or exclamation mark
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        chunk_paths = []
+        chunk_idx = 0
+        current_chunk = []
+        current_tokens = []
+        
+        for sentence in sentences:
+            # Tokenize sentence
+            sentence_tokens = tokenizer.encode(sentence)
+            sentence_token_count = len(sentence_tokens)
+            
+            # Check if adding this sentence would exceed limit
+            if len(current_tokens) + sentence_token_count > max_tokens and current_tokens:
+                # Save current chunk
+                chunk_idx += 1
+                chunk_path = os.path.join(chunks_dir, f"chunk_{chunk_idx:03d}.txt")
+                chunk_text = ' '.join(current_chunk)
+                
+                with open(chunk_path, 'w', encoding='utf-8') as chunk_file:
+                    chunk_file.write(chunk_text)
+                
+                chunk_paths.append(chunk_path)
+                # print(f"Created chunk {chunk_idx} with {len(current_tokens)} tokens")
+                
+                # Reset for next chunk
+                current_chunk = []
+                current_tokens = []
+                
+            # If a single sentence is too long, split it
+            if sentence_token_count > max_tokens:
+                print(f"Warning: Found very long sentence with {sentence_token_count} tokens, splitting forcefully")
+                # Split the tokens into chunks
+                for i in range(0, sentence_token_count, max_tokens):
+                    sub_tokens = sentence_tokens[i:min(i+max_tokens, sentence_token_count)]
+                    # Decode back to text
+                    sub_text = tokenizer.decode(sub_tokens)
+                    
+                    chunk_idx += 1
+                    chunk_path = os.path.join(chunks_dir, f"chunk_{chunk_idx:03d}.txt")
+                    
+                    with open(chunk_path, 'w', encoding='utf-8') as chunk_file:
+                        chunk_file.write(sub_text)
+                    
+                    chunk_paths.append(chunk_path)
+                    # print(f"Created chunk {chunk_idx} with {len(sub_tokens)} tokens (forced split)")
+            else:
+                # Add sentence to current chunk
+                current_chunk.append(sentence)
+                current_tokens.extend(sentence_tokens)
+        
+        # Save any remaining content as the last chunk
+        if current_chunk:
+            chunk_idx += 1
+            chunk_path = os.path.join(chunks_dir, f"chunk_{chunk_idx:03d}.txt")
+            chunk_text = ' '.join(current_chunk)
+            
+            with open(chunk_path, 'w', encoding='utf-8') as chunk_file:
+                chunk_file.write(chunk_text)
+            
+            chunk_paths.append(chunk_path)
+            print(f"Created chunk {chunk_idx} with {len(current_tokens)} tokens")
+        
+        print(f"Split corpus into {len(chunk_paths)} chunks")
+        return chunk_paths
+    
+    # Chunk the corpus based on token count
+    corpus_paths = chunk_corpus_by_tokens(corpus_path, output_dir, tokenizer, max_tokens=900)
+    
+    # Check if we can use the first chunk for verification
+    verification_path = corpus_paths[0]
+    
     # Verify dataset creation will work
     print("Verifying dataset creation...")
-    if not verify_dataset_creation(corpus_path, tokenizer, block_size):
+    if not verify_dataset_creation(verification_path, tokenizer, block_size):
         # Try with a smaller block size
         smaller_block_size = 64
         print(f"Trying with smaller block_size = {smaller_block_size}")
-        if verify_dataset_creation(corpus_path, tokenizer, smaller_block_size):
+        if verify_dataset_creation(verification_path, tokenizer, smaller_block_size):
             block_size = smaller_block_size
         else:
-            raise ValueError(f"Cannot create dataset from corpus file {corpus_path}. Please check the file content.")
+            raise ValueError(f"Cannot create dataset from corpus file {verification_path}. Please check the file content.")
     
-    # Create dataset
-    print(f"Creating dataset with block_size={block_size}...")
-    try:
-        dataset = TextDataset(
-            tokenizer=tokenizer,
-            file_path=corpus_path,
-            block_size=block_size,
-        )
-        
-        # Verify dataset has samples
-        if not hasattr(dataset, 'examples') or len(dataset.examples) == 0:
-            raise ValueError("Dataset created but contains 0 samples")
+    # Create datasets from chunks
+    print(f"Creating datasets from {len(corpus_paths)} chunks with block_size={block_size}...")
+    
+    # Create a dataset from each chunk
+    datasets = []
+    for chunk_path in corpus_paths:
+        try:
+            chunk_dataset = TextDataset(
+                tokenizer=tokenizer,
+                file_path=chunk_path,
+                block_size=block_size,
+            )
             
-        print(f"Dataset created successfully with {len(dataset.examples)} samples")
+            if hasattr(chunk_dataset, 'examples') and len(chunk_dataset.examples) > 0:
+                datasets.append(chunk_dataset)
+                # print(f"Added dataset from {chunk_path} with {len(chunk_dataset.examples)} examples")
+            else:
+                print(f"Warning: Dataset from {chunk_path} has 0 examples, skipping")
+                
+        except Exception as e:
+            print(f"Error creating dataset from {chunk_path}: {e}")
+            print("Skipping this chunk and continuing")
+    
+    if not datasets:
+        raise ValueError("Could not create any valid datasets from corpus chunks")
         
-    except Exception as e:
-        print(f"Error creating dataset: {str(e)}")
-        raise
+    # Combine all datasets if multiple chunks
+    if len(datasets) > 1:
+        from torch.utils.data import ConcatDataset
+        dataset = ConcatDataset(datasets)
+        print(f"Combined dataset created with {len(dataset)} total examples")
+    else:
+        dataset = datasets[0]
+        print(f"Using single dataset with {len(dataset)} examples")
     
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, 
@@ -266,6 +389,7 @@ def train_latin_model(corpus_path, output_dir, block_size=128, force_cpu=False):
         per_device_train_batch_size=8,
         save_steps=10_000,
         save_total_limit=2,
+        no_cuda=True,  # Prevent CUDA usage which can help avoid MPS issues
     )
     
     # Initialize trainer
