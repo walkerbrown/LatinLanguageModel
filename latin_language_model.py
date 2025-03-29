@@ -662,10 +662,11 @@ def main():
     
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Latin Language Model Training Pipeline')
-    parser.add_argument('--corpus', type=str, required=True, help='Path to the raw Latin corpus file')
+    parser.add_argument('--corpus', type=str, help='Path to the raw Latin corpus file')
     parser.add_argument('--output', type=str, default='./output_model', help='Output directory for model files')
     parser.add_argument('--clean-only', action='store_true', help='Only clean the corpus without training')
     parser.add_argument('--skip-clean', action='store_true', help='Skip corpus cleaning step')
+    parser.add_argument('--skip-train', action='store_true', help='Skip training and go directly to optimization/export')
     parser.add_argument('--epochs', type=int, default=4, help='Number of training epochs')
     parser.add_argument('--model-name', type=str, default='LatinTransformer', help='Name for the final CoreML model')
     parser.add_argument('--block-size', type=int, default=128, help='Block size for dataset creation')
@@ -678,40 +679,53 @@ def main():
     model_output_dir = os.path.join(args.output, "model")
     coreml_output_dir = os.path.join(args.output, "coreml")
     
-    # Step 1: Check if corpus file exists
-    if not os.path.exists(args.corpus):
-        raise FileNotFoundError(f"Corpus file not found: {args.corpus}")
-        
-    # Step 2: Clean corpus
-    if not args.skip_clean:
-        cleaned_corpus_path = os.path.join(args.output, "cleaned_corpus.txt")
-        clean_latin_corpus(args.corpus, cleaned_corpus_path)
-        corpus_path = cleaned_corpus_path
-        
-        # Analyze cleaned corpus
-        analyze_corpus(corpus_path)
+    # Check if we're skipping training
+    if args.skip_train:
+        print("\n=== Skipping Training, Using Existing Model ===")
+        if not os.path.exists(model_output_dir):
+            print(f"ERROR: Model directory {model_output_dir} does not exist but --skip-train specified.")
+            print("Please provide a valid model directory with --output")
+            return
     else:
-        corpus_path = args.corpus
-        print(f"Skipping cleaning, using corpus at: {corpus_path}")
+        # Corpus is required if not skipping training
+        if not args.corpus:
+            print("ERROR: --corpus is required when not using --skip-train")
+            return
+            
+        # Step 1: Check if corpus file exists
+        if not os.path.exists(args.corpus):
+            raise FileNotFoundError(f"Corpus file not found: {args.corpus}")
+            
+        # Step 2: Clean corpus
+        if not args.skip_clean:
+            cleaned_corpus_path = os.path.join(args.output, "cleaned_corpus.txt")
+            clean_latin_corpus(args.corpus, cleaned_corpus_path)
+            corpus_path = cleaned_corpus_path
+            
+            # Analyze cleaned corpus
+            analyze_corpus(corpus_path)
+        else:
+            corpus_path = args.corpus
+            print(f"Skipping cleaning, using corpus at: {corpus_path}")
+            
+            # Still analyze the corpus
+            analyze_corpus(corpus_path)
         
-        # Still analyze the corpus
-        analyze_corpus(corpus_path)
-    
-    # Exit if clean-only mode
-    if args.clean_only:
-        print("Clean-only mode selected. Exiting.")
-        return
-    
-    # Step 3: Train model
-    print("\n=== Training Model ===")
-    try:
-        model, tokenizer = train_latin_model(corpus_path, model_output_dir, args.block_size, args.force_cpu)
-    except ValueError as e:
-        print(f"Error during model training: {str(e)}")
-        # If it fails with the original block_size, try a smaller one
-        if "num_samples=0" in str(e) and args.block_size > 64:
-            print("Trying again with a smaller block size (64)...")
-            model, tokenizer = train_latin_model(corpus_path, model_output_dir, 64, args.force_cpu)
+        # Exit if clean-only mode
+        if args.clean_only:
+            print("Clean-only mode selected. Exiting.")
+            return
+        
+        # Step 3: Train model
+        print("\n=== Training Model ===")
+        try:
+            model, tokenizer = train_latin_model(corpus_path, model_output_dir, args.block_size, args.force_cpu)
+        except ValueError as e:
+            print(f"Error during model training: {str(e)}")
+            # If it fails with the original block_size, try a smaller one
+            if "num_samples=0" in str(e) and args.block_size > 64:
+                print("Trying again with a smaller block size (64)...")
+                model, tokenizer = train_latin_model(corpus_path, model_output_dir, 64, args.force_cpu)
     
     # Step 4: Optimize model
     print("\n=== Optimizing Model ===")
@@ -722,8 +736,9 @@ def main():
     export_to_coreml(quantized_model, tokenizer, coreml_output_dir, args.model_name)
     
     print("\n=== Pipeline Complete ===")
-    print(f"Raw corpus: {args.corpus}")
-    print(f"Cleaned corpus: {corpus_path}")
+    if not args.skip_train:
+        print(f"Raw corpus: {args.corpus}")
+        print(f"Cleaned corpus: {corpus_path}")
     print(f"Model output: {model_output_dir}")
     print(f"Quantized model: {model_output_dir}_quantized")
     print(f"CoreML model: {coreml_output_dir}/{args.model_name}.mlmodel")
