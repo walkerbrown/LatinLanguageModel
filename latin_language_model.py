@@ -415,42 +415,15 @@ def train_latin_model(corpus_path, output_dir, block_size=128, force_cpu=False):
     
     return model, tokenizer
 
-# 2. Optimize model for on-device use
-def optimize_model(model_path):
+# 2. Export to CoreML format
+def export_to_coreml(model_path, coreml_output_dir, model_name="LatinTransformer"):
+    # Create CoreML output directory
+    coreml_dir = os.path.join(coreml_output_dir)
+    os.makedirs(coreml_dir, exist_ok=True)
+
     # Load the fine-tuned model
     model = AutoModelForCausalLM.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    
-    # Ensure model is on CPU for quantization
-    model = model.cpu()
-    
-    # Quantize the model to reduce size
-    # This uses dynamic quantization
-    model.qconfig = get_default_qconfig('qnnpack')
-    quantized_model = torch.quantization.quantize_dynamic(
-        model, 
-        {nn.Linear}, 
-        dtype=torch.qint8
-    )
-    
-    # Save quantized model
-    quantized_path = f"{model_path}_quantized"
-    os.makedirs(quantized_path, exist_ok=True)
-    quantized_model.save_pretrained(quantized_path)
-    
-    # Copy vocabulary file to quantized directory
-    vocab_src = os.path.join(model_path, "latin_vocab.json")
-    vocab_dst = os.path.join(quantized_path, "latin_vocab.json")
-    if os.path.exists(vocab_src):
-        import shutil
-        shutil.copy(vocab_src, vocab_dst)
-    
-    return quantized_model, tokenizer
-
-# 3. Export to CoreML format
-def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer"):
-    # Create output directory if it doesn't exist
-    os.makedirs(output_path, exist_ok=True)
     
     # Move model to CPU for tracing and export
     model = model.cpu()
@@ -462,60 +435,56 @@ def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer
     
     # Create a simple input example
     print("Creating example input for tracing...")
-    
-    # Use a slightly longer sequence to ensure proper tracing
     example_text = "Lorem ipsum dolor sit amet, consectetur adipiscing"
-    input_ids = tokenizer.encode(example_text, return_tensors="pt").cpu()
-    input_ids.detatch() # Make sure input doesn't require gradients either
+    example_input = tokenizer.encode(example_text, return_tensors="pt").cpu()
+
+    # Use the latest export from pytorch, accepts a tuple of example inputs
+    exported_model = torch.export.export(model, (example_input,))
     
-    # Define the function to trace
-    def model_prediction(x):
-        # Ensure input is on CPU
-        x = x.cpu()
-        with torch.no_grad():
-            # Get logits from the model (which is now on CPU)
-            outputs = model(x)
-            logits = outputs.logits
-            # Take the logits for the last token
-            next_token_logits = logits[:, -1, :]
-            return next_token_logits
+    # # Define the function to trace
+    # def model_prediction(x):
+    #     # Ensure input is on CPU
+    #     x = x.cpu()
+    #     with torch.no_grad():
+    #         # Get logits from the model (which is now on CPU)
+    #         outputs = model(x)
+    #         logits = outputs.logits
+    #         # Take the logits for the last token
+    #         next_token_logits = logits[:, -1, :]
+    #         return next_token_logits
     
-    print(f"Tracing model with input shape: {input_ids.shape}")
+    # print(f"Tracing model with input shape: {input_ids.shape}")
     
-    # Trace the model
-    try:
-        traced_model = torch.jit.trace(model_prediction, input_ids)
-        print("Model traced successfully")
-    except Exception as e:
-        print(f"Error tracing model: {str(e)}")
-        print("Trying alternative approach with script instead of trace...")
+    # # Trace the model
+    # try:
+    #     traced_model = torch.jit.trace(model_prediction, input_ids)
+    #     print("Model traced successfully")
+    # except Exception as e:
+    #     print(f"Error tracing model: {str(e)}")
+    #     print("Trying alternative approach with script instead of trace...")
         
-        # Alternative approach using script instead of trace
-        def alternative_model_prediction(x):
-            # Ensure input is on CPU
-            x = x.cpu()
-            with torch.no_grad():
-                outputs = model(x)
-                return outputs.logits[:, -1, :]
+    #     # Alternative approach using script instead of trace
+    #     def alternative_model_prediction(x):
+    #         # Ensure input is on CPU
+    #         x = x.cpu()
+    #         with torch.no_grad():
+    #             outputs = model(x)
+    #             return outputs.logits[:, -1, :]
                 
-        try:
-            traced_model = torch.jit.script(alternative_model_prediction)
-            # Test with example input
-            test_output = traced_model(input_ids)
-            print(f"Alternative approach successful. Output shape: {test_output.shape}")
-        except Exception as e2:
-            print(f"Alternative approach also failed: {str(e2)}")
-            raise ValueError("Could not trace or script the model for CoreML conversion")
+    #     try:
+    #         traced_model = torch.jit.script(alternative_model_prediction)
+    #         # Test with example input
+    #         test_output = traced_model(input_ids)
+    #         print(f"Alternative approach successful. Output shape: {test_output.shape}")
+    #     except Exception as e2:
+    #         print(f"Alternative approach also failed: {str(e2)}")
+    #         raise ValueError("Could not trace or script the model for CoreML conversion")
     
     print("Converting to CoreML format...")
     
     # Convert to CoreML with error handling
     try:
-        mlmodel = ct.convert(
-            traced_model,
-            inputs=[ct.TensorType(name="input", shape=input_ids.shape, dtype=np.int32)],
-            compute_units=ct.ComputeUnit.CPU_AND_NE  # Use Neural Engine if available
-        )
+        mlmodel = ct.convert(exported_model)
         
         # Set model metadata
         mlmodel.author = "Dylan Walker Brown"
@@ -524,46 +493,19 @@ def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer
         mlmodel.version = "0.1.0"
         
         # Save the model
-        model_path = os.path.join(output_path, f"{model_name}.mlmodel")
-        mlmodel.save(model_path)
+        output_path = os.path.join(output_path, f"{model_name}.mlpackage")
+        mlmodel.save(output_path)
         
-        print(f"Model successfully exported to {model_path}")
-        print(f"Model size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
+        print(f"Model successfully exported to {output_path}")
+        print(f"Model size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
         
-        return model_path
+        return output_path
         
     except Exception as e:
-        print(f"Error converting to CoreML: {str(e)}")
-        print("\nDetailed error information:")
-        import traceback
-        traceback.print_exc()
-        
-        print("\nTrying alternative conversion approach...")
-        try:
-            # Try with fixed input shape
-            fixed_shape = [1, 10]  # Try with a fixed sequence length of 10
-            fixed_input = torch.zeros(fixed_shape, dtype=torch.int32, device="cpu")
-            fixed_traced = torch.jit.trace(model_prediction, fixed_input)
-            
-            mlmodel = ct.convert(
-                fixed_traced,
-                inputs=[ct.TensorType(name="input", shape=fixed_shape, dtype=np.int32)],
-                compute_units=ct.ComputeUnit.CPU_ONLY  # Fall back to CPU only
-            )
-            
-            model_path = os.path.join(output_path, f"{model_name}_fallback.mlmodel")
-            mlmodel.save(model_path)
-            
-            print(f"Fallback model successfully exported to {model_path}")
-            print(f"Fallback model size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
-            
-            return model_path
-            
-        except Exception as e2:
-            print(f"Alternative conversion also failed: {str(e2)}")
-            raise ValueError("Could not convert model to CoreML format")
+        print(f"Error converting model to CoreML: {str(e)}")
+        raise ValueError("Could not convert model to CoreML format")
 
-# 4. Analyze corpus and vocabulary for diagnostics
+# 3. Analyze corpus and vocabulary for diagnostics
 def analyze_corpus(corpus_path):
     """Perform basic analysis on the corpus to check its suitability for training"""
     with open(corpus_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -662,7 +604,7 @@ def diagnose_system():
     
     print("===========================\n")
 
-# 5. Main function to run the entire pipeline
+# 4. Main function to run the entire pipeline
 def main():
     # Run system diagnostics first
     diagnose_system()
@@ -734,13 +676,9 @@ def main():
                 print("Trying again with a smaller block size (64)...")
                 model, tokenizer = train_latin_model(corpus_path, model_output_dir, 64, args.force_cpu)
     
-    # Step 4: Optimize model
-    print("\n=== Optimizing Model ===")
-    quantized_model, tokenizer = optimize_model(model_output_dir)
-    
-    # Step 5: Export to CoreML
+    # Step 4: Export to CoreML
     print("\n=== Exporting to CoreML ===")
-    export_to_coreml(quantized_model, tokenizer, coreml_output_dir, args.model_name)
+    export_to_coreml(model_output_dir, coreml_output_dir, args.model_name)
     
     print("\n=== Pipeline Complete ===")
     if not args.skip_train:
