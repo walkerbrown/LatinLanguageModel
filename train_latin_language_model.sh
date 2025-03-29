@@ -7,9 +7,9 @@ source venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the script
-python latin_language_model.py --corpus "../LatinTextDataset/latincorpus.txt" --epochs 8
+# Run the PyTorch model training and Apple CoreML conversion script
+python latin_language_model.py --corpus "../LatinTextDataset/latincorpus.txt"
 
-# Deactivate virtual environment when done
+# Deactivate virtual environment and remove it
 deactivate
 rm -r venv
