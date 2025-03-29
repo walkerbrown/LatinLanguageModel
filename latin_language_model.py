@@ -5,6 +5,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
 import torch.nn as nn
 from torch.quantization import get_default_qconfig
+from executorch import exir
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import platform
 import sys
@@ -432,14 +433,21 @@ def export_to_coreml(model_path, coreml_output_dir, model_name="LatinTransformer
     # Put model in evaluation mode
     model.eval()
     print("Model put in evaluation mode for tracing")
+
+    # Disable gradient computation across the entire model
+    for param in model.parameters():
+        param.requires_grad = False
     
     # Create a simple input example
     print("Creating example input for tracing...")
     example_text = "Lorem ipsum dolor sit amet, consectetur adipiscing"
     example_input = tokenizer.encode(example_text, return_tensors="pt").cpu()
 
-    # Use the latest export from pytorch, accepts a tuple of example inputs
+    # Use the latest ExportProgram from pytorch, traces a tuple of example inputs
     exported_model = torch.export.export(model, (example_input,))
+
+    # Convert ExportProgram to Edge Dialect
+    edge_dialect_program: exir.EdgeProgramManager = exir.to_edge(exported_model)
     
     # # Define the function to trace
     # def model_prediction(x):
@@ -484,7 +492,7 @@ def export_to_coreml(model_path, coreml_output_dir, model_name="LatinTransformer
     
     # Convert to CoreML with error handling
     try:
-        mlmodel = ct.convert(exported_model)
+        mlmodel = ct.convert(edge_dialect_program.exported_program(), source='pytorch')
         
         # Set model metadata
         mlmodel.author = "Dylan Walker Brown"
@@ -493,13 +501,11 @@ def export_to_coreml(model_path, coreml_output_dir, model_name="LatinTransformer
         mlmodel.version = "0.1.0"
         
         # Save the model
-        output_path = os.path.join(output_path, f"{model_name}.mlpackage")
+        output_path = os.path.join(coreml_output_dir, f"{model_name}.mlpackage")
         mlmodel.save(output_path)
         
         print(f"Model successfully exported to {output_path}")
         print(f"Model size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
-        
-        return output_path
         
     except Exception as e:
         print(f"Error converting model to CoreML: {str(e)}")
