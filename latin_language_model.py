@@ -455,6 +455,10 @@ def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer
     # Move model to CPU for tracing and export
     model = model.cpu()
     print("Model moved to CPU for CoreML export")
+
+    # Put model in evaluation mode
+    model.eval()
+    print("Model put in evaluation mode for tracing")
     
     # Create a simple input example
     print("Creating example input for tracing...")
@@ -462,6 +466,7 @@ def export_to_coreml(model, tokenizer, output_path, model_name="LatinTransformer
     # Use a slightly longer sequence to ensure proper tracing
     example_text = "Lorem ipsum dolor sit amet, consectetur adipiscing"
     input_ids = tokenizer.encode(example_text, return_tensors="pt").cpu()
+    input_ids.detatch() # Make sure input doesn't require gradients either
     
     # Define the function to trace
     def model_prediction(x):
