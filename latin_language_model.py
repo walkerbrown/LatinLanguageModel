@@ -4,6 +4,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import torch.nn as nn
+from torch.quantization import get_default_qconfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import platform
 import sys
@@ -425,6 +426,7 @@ def optimize_model(model_path):
     
     # Quantize the model to reduce size
     # This uses dynamic quantization
+    model.qconfig = get_default_qconfig('qnnpack')
     quantized_model = torch.quantization.quantize_dynamic(
         model, 
         {nn.Linear}, 
