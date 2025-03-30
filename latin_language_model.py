@@ -253,6 +253,10 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
         use_fast=True
     )
     
+    # Ensure tokenizer's model_max_length is properly set
+    tokenizer.model_max_length = n_positions
+    print(f"Tokenizer max length set to {tokenizer.model_max_length}")
+    
     # Create a significantly reduced vocabulary tokenizer
     if tokenizer.vocab_size > vocab_size:
         print(f"Reducing vocabulary size from {tokenizer.vocab_size} to {vocab_size}")
@@ -285,8 +289,18 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
     
     # Calculate and display the parameter reduction
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"Created minimal Latin model with only {param_count/1e6:.2f}M parameters")
-    print(f"Expected model size reduction: >4x compared to default models")
+    print(f"Created Latin model with {param_count/1e6:.2f}M parameters")
+    
+    # Estimate model size in memory
+    estimated_model_mb = (param_count * 4) / (1024 * 1024)  # 4 bytes per parameter (float32)
+    print(f"Estimated model memory footprint: ~{estimated_model_mb:.2f}MB")
+    
+    if estimated_model_mb > 30:
+        print(f"WARNING: Model may exceed 30MB memory constraint. Consider reducing parameters.")
+    else:
+        print(f"Model is within 30MB memory constraint with {30-estimated_model_mb:.2f}MB margin.")
+        
+    print(f"Parameter efficiency: Much smaller than standard models while prioritizing Latin language features")
     
     # Only move to device if not using CPU (to avoid unnecessary operations)
     if device != "cpu":
@@ -301,7 +315,7 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
     # Function to chunk corpus into token-sized pieces
     def chunk_corpus_by_tokens(corpus_path, output_dir, tokenizer, max_tokens=900):
         """
-        Split corpus into chunks based on token count to stay under the 1024 token limit
+        Split corpus into chunks based on token count to stay under 1024 token limit
         """
         print(f"Checking if corpus needs chunking by token count...")
 
@@ -367,9 +381,6 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
 
             # If a single sentence is too long, split it
             if sentence_token_count > max_tokens:
-                print(
-                    f"Warning: Found very long sentence with {sentence_token_count} tokens, splitting forcefully"
-                )
                 # Split the tokens into chunks
                 for i in range(0, sentence_token_count, max_tokens):
                     sub_tokens = sentence_tokens[
@@ -400,14 +411,13 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
                 chunk_file.write(chunk_text)
 
             chunk_paths.append(chunk_path)
-            print(f"Created chunk {chunk_idx} with {len(current_tokens)} tokens")
 
         print(f"Split corpus into {len(chunk_paths)} chunks")
         return chunk_paths
 
     # Chunk the corpus based on token count
     corpus_paths = chunk_corpus_by_tokens(
-        corpus_path, output_dir, tokenizer, max_tokens=900
+        corpus_path, output_dir, tokenizer
     )
 
     # Check if we can use the first chunk for verification
@@ -416,15 +426,9 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
     # Verify dataset creation will work
     print("Verifying dataset creation...")
     if not verify_dataset_creation(verification_path, tokenizer, block_size):
-        # Try with a smaller block size
-        smaller_block_size = 64
-        print(f"Trying with smaller block_size = {smaller_block_size}")
-        if verify_dataset_creation(verification_path, tokenizer, smaller_block_size):
-            block_size = smaller_block_size
-        else:
-            raise ValueError(
-                f"Cannot create dataset from corpus file {verification_path}. Please check the file content."
-            )
+        raise ValueError(
+            f"Cannot create dataset from corpus file {verification_path}. Please check the file content."
+        )
 
     # Create datasets from chunks
     print(
@@ -443,9 +447,6 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
 
             if hasattr(chunk_dataset, "examples") and len(chunk_dataset.examples) > 0:
                 datasets.append(chunk_dataset)
-                # print(f"Added dataset from {chunk_path} with {len(chunk_dataset.examples)} examples")
-            else:
-                print(f"Warning: Dataset from {chunk_path} has 0 examples, skipping")
 
         except Exception as e:
             print(f"Error creating dataset from {chunk_path}: {e}")
@@ -474,10 +475,15 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
         output_dir=output_dir,
         overwrite_output_dir=True,
         num_train_epochs=epochs,
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=4,  # Reduced batch size for smaller models
+        gradient_accumulation_steps=2,  # Accumulate gradients to compensate for smaller batch
         save_steps=10_000,
         save_total_limit=2,
-        no_cuda=True,  # Prevent CUDA usage which can help avoid MPS issues
+        use_cpu=True,  # Use CPU instead of GPU/MPS (replaces deprecated no_cuda)
+        prediction_loss_only=True,
+        # Debug settings to help with sequence length issues
+        debug="underflow_overflow",
+        logging_steps=10
     )
 
     # Initialize trainer
@@ -683,13 +689,13 @@ def main():
     parser.add_argument('--skip-train', action='store_true', help='Skip training and go directly to optimization/export')
     parser.add_argument('--epochs', type=int, default=4, help='Number of training epochs')
     parser.add_argument('--model-name', type=str, default='LatinTransformer', help='Name for the final CoreML model')
-    parser.add_argument('--block-size', type=int, default=128, help='Block size for dataset creation')
+    parser.add_argument('--block-size', type=int, default=64, help='Block size for dataset creation (balanced for stability)')
     parser.add_argument('--force-cpu', action='store_true', help='Force the use of CPU even if GPU is available')
-    parser.add_argument('--vocab-size', type=int, default=8000, help='Max vocabulary size for model reduction')
-    parser.add_argument('--hidden-size', type=int, default=128, help='Hidden size for model reduction')
-    parser.add_argument('--num-heads', type=int, default=2, help='Number of attention heads for model reduction')
-    parser.add_argument('--num-layers', type=int, default=3, help='Number of transformer layers')
-    parser.add_argument('--context-size', type=int, default=128, help='Maximum context window size')
+    parser.add_argument('--vocab-size', type=int, default=12000, help='Max vocabulary size for model reduction')
+    parser.add_argument('--hidden-size', type=int, default=256, help='Hidden size for model reduction')
+    parser.add_argument('--num-heads', type=int, default=4, help='Number of attention heads for model reduction')
+    parser.add_argument('--num-layers', type=int, default=4, help='Number of transformer layers')
+    parser.add_argument('--context-size', type=int, default=256, help='Maximum context window size')
     
     args = parser.parse_args()
 
