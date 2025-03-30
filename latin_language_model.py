@@ -4,7 +4,7 @@ from executorch import exir
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import platform
 import sys
-from transformers import TextDataset, DataCollatorForLanguageModeling
+from transformers import TextDataset
 from transformers import Trainer, TrainingArguments, GPT2Config, GPT2LMHeadModel
 import coremltools as ct
 import json
@@ -67,10 +67,12 @@ def clean_latin_corpus(input_path, output_path):
     # Step 5: Filter out obvious non-Latin content
     # Create a set of common English words that aren't also Latin
     english_words = set(nltk_words.words())
+    # fmt: off
     latin_loanwords = {'et', 'in', 'ad', 'non', 'per', 'cum', 'ex', 'de', 'si', 'sum', 'pro', 
                       'ego', 'tu', 'nos', 'vos', 'ante', 'post', 'sub', 'super', 'est', 'sunt',
                       'via', 'visa', 'status', 'item', 'veto', 'alias', 'versus', 'campus',
                       'bonus', 'exit', 'extra', 'data', 'media', 'maximum', 'minimum', 'interim'}
+    # fmt: on
     non_latin_identifiers = []
 
     # Identify paragraphs that are likely English
@@ -101,7 +103,7 @@ def clean_latin_corpus(input_path, output_path):
     # Ensure the corpus has enough content
     if len(text.strip()) < 500:
         print(
-            "WARNING: Cleaned corpus is very small (<500 chars). This may cause training issues."
+            "Warning: Cleaned corpus is very small (<500 chars). This may cause training issues."
         )
 
         # Add some sample Latin text if corpus is too small
@@ -140,89 +142,6 @@ def clean_latin_corpus(input_path, output_path):
 
     return output_path
 
-# Function to create a dataset within reduced vocabulary
-def create_safe_dataset(tokenizer, file_path, block_size, vocab_size):
-    """
-    Create a dataset while ensuring all token IDs are within vocabulary range
-    """
-    try:
-        # Read the file
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-        
-        # Tokenize the text
-        tokenized_text = tokenizer.encode(text)
-        
-        # Ensure all token IDs are within vocabulary range
-        if max(tokenized_text) >= vocab_size:
-            # print(f"WARNING: Found token IDs outside vocabulary range in {file_path}")
-            # Clamp token IDs to stay within vocabulary range
-            tokenized_text = [min(token_id, vocab_size - 1) for token_id in tokenized_text]
-            # Recreate the text from clamped tokens
-            text = tokenizer.decode(tokenized_text)
-            
-            # Write back the fixed text (optional)
-            safe_path = file_path + ".safe"
-            with open(safe_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            file_path = safe_path
-            # print(f"Created safe version at {safe_path}")
-        
-        # Create dataset from the safe text
-        dataset = TextDataset(
-            tokenizer=tokenizer,
-            file_path=file_path,
-            block_size=block_size,
-        )
-        
-        return dataset
-        
-    except Exception as e:
-        print(f"Error creating dataset from {file_path}: {e}")
-        return None
-
-
-# Function to verify dataset creation will work
-def verify_dataset_creation(file_path, tokenizer, block_size):
-    """Check if the dataset creation will work with the given parameters"""
-    try:
-        # Check file size
-        file_size = os.path.getsize(file_path)
-        if file_size == 0:
-            print(f"ERROR: File {file_path} is empty")
-            return False
-
-        # Read a small sample to test tokenization
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            sample_text = f.read(min(file_size, 1000))  # Read up to 1000 chars
-
-        # Test tokenization
-        tokens = tokenizer.encode(sample_text)
-        if len(tokens) == 0:
-            print(f"ERROR: Tokenizer produced 0 tokens from sample text")
-            return False
-
-        print(f"Sample tokenization produced {len(tokens)} tokens")
-
-        # Calculate estimated number of samples
-        estimated_tokens = (file_size / len(sample_text)) * len(tokens)
-        estimated_samples = max(1, int(estimated_tokens / block_size))
-
-        print(f"Estimated number of samples: {estimated_samples}")
-
-        if estimated_samples < 10:
-            print(
-                f"WARNING: Very few samples estimated ({estimated_samples}). Training may not be effective."
-            )
-            if block_size > 64 and estimated_samples < 5:
-                print(f"Suggestion: Reduce block_size from {block_size} to 64")
-
-        return estimated_samples > 0
-
-    except Exception as e:
-        print(f"Error verifying dataset: {str(e)}")
-        return False
-
 
 # Set device configuration
 def configure_device(force_cpu=False):
@@ -243,8 +162,6 @@ def configure_device(force_cpu=False):
         print("MPS (Metal Performance Shaders) device available, using Apple GPU")
 
         # Set environment variables to control MPS behavior
-        import os
-
         os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
         # Test MPS functionality before committing to it
@@ -266,110 +183,117 @@ def configure_device(force_cpu=False):
 
 class ClampedTextDataset(torch.utils.data.Dataset):
     """Dataset for language modeling that ensures token IDs are within vocabulary range"""
-    
+
     def __init__(self, file_path, tokenizer, block_size, vocab_size):
         assert os.path.isfile(file_path), f"Input file path {file_path} not found"
-        
-        print(f"Creating clamped dataset from {file_path} with vocab_size={vocab_size}")
+
         self.examples = []
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
-        
-        with open(file_path, 'r', encoding="utf-8", errors="replace") as f:
+
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
-        
+
         # Process the file content in smaller chunks to avoid memory issues
         tokenized_text = []
         chunk_size = 100000  # Process 100k characters at a time
         for i in range(0, len(text), chunk_size):
-            chunk = text[i:i+chunk_size]
+            chunk = text[i : i + chunk_size]
             chunk_tokens = tokenizer.encode(chunk)
             # Clamp token IDs to be within vocabulary size
-            chunk_tokens = [min(token_id, vocab_size-1) for token_id in chunk_tokens]
+            chunk_tokens = [min(token_id, vocab_size - 1) for token_id in chunk_tokens]
             tokenized_text.extend(chunk_tokens)
-        
+
         # Create block examples
         for i in range(0, len(tokenized_text) - block_size + 1, block_size):
-            example = tokenized_text[i:i + block_size]
+            example = tokenized_text[i : i + block_size]
             self.examples.append(example)
-        
-        print(f"Created {len(self.examples)} examples from {file_path}")
-    
+
     def __len__(self):
         return len(self.examples)
-    
+
     def __getitem__(self, i):
         return torch.tensor(self.examples[i], dtype=torch.long)
 
 
 class ClampedDataCollator:
     """Data collator that ensures all token IDs are within vocabulary range"""
-    
+
     def __init__(self, tokenizer, vocab_size):
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
         print(f"Initialized clamped data collator with vocab_size={vocab_size}")
-    
+
     def __call__(self, examples):
-        import torch
-        
         # Convert list of examples to tensors
         if isinstance(examples[0], list):
             examples = [torch.tensor(e, dtype=torch.long) for e in examples]
-        
+
         # Find the max length for padding
         max_length = max(len(ex) for ex in examples)
-        
+
         # Initialize the batch tensors
         batch_size = len(examples)
-        batch = torch.full((batch_size, max_length), self.tokenizer.pad_token_id, dtype=torch.long)
-        
+        batch = torch.full(
+            (batch_size, max_length), self.tokenizer.pad_token_id, dtype=torch.long
+        )
+
         # Fill the batch and clamp token IDs
         for i, example in enumerate(examples):
             example_length = len(example)
             # Clamp token IDs to be within vocabulary size
-            clamped_example = torch.clamp(example, max=self.vocab_size-1)
+            clamped_example = torch.clamp(example, max=self.vocab_size - 1)
             batch[i, :example_length] = clamped_example
-        
+
         # Create labels (same as input_ids for autoregressive LM)
         labels = batch.clone()
-        
+
         return {
             "input_ids": batch,
             "labels": labels,
-            "attention_mask": (batch != self.tokenizer.pad_token_id).long()
+            "attention_mask": (batch != self.tokenizer.pad_token_id).long(),
         }
 
 
 # 1. Train or fine-tune the model
-def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu=False,
-                  vocab_size=8000, hidden_size=128, num_heads=2, num_layers=3, context_size=128):
+def train_latin_model(
+    corpus_path,
+    output_dir,
+    epochs,
+    block_size=128,
+    force_cpu=False,
+    vocab_size=8000,
+    hidden_size=128,
+    num_heads=2,
+    num_layers=3,
+    context_size=128,
+):
     """Train a Latin language model by fine-tuning GPT-2 using the provided corpus"""
     # Initialize parameters
     n_positions = context_size
     n_embd = hidden_size
     n_layer = num_layers
     n_head = num_heads
-    
+
     print(f"Using minimalist model configuration tailored for Latin:")
     print(f"  - Vocab size: {vocab_size} tokens (optimized for Latin)")
     print(f"  - Embedding dimension: {n_embd}")
     print(f"  - Layers: {n_layer}")
     print(f"  - Attention heads: {n_head}")
     print(f"  - Context window: {n_positions} tokens")
-    
+
     # Initialize the tokenizer using the standard GPT2Tokenizer
     print("Initializing tokenizer from standard GPT2...")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Configure device
     device = configure_device(force_cpu)
     print(f"Using device: {device}")
 
     # Create model configuration with reduced vocabulary size
     model_config = GPT2Config(
-        vocab_size=vocab_size,      # Limited vocabulary size
+        vocab_size=vocab_size,  # Limited vocabulary size
         n_positions=n_positions,
         n_embd=n_embd,
         n_layer=n_layer,
@@ -383,16 +307,16 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
-        tie_word_embeddings=True
+        tie_word_embeddings=True,
     )
-    
+
     # Initialize model with reduced configuration
     model = GPT2LMHeadModel(model_config)
-    
+
     # Calculate parameters
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Created Latin model with {param_count/1e6:.2f}M parameters")
-    
+
     # Move to device if needed
     if device != "cpu":
         try:
@@ -435,10 +359,8 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
             f"Corpus exceeds token limit, splitting into chunks of max {max_tokens} tokens"
         )
 
-        # Split the text into sentences for cleaner chunks
-        import re
-
-        # Match sentences ending with period, question mark, or exclamation mark
+        # Split the text into sentences for cleaner chunks and match
+        # sentences ending with period, question mark, or exclamation mark
         sentences = re.split(r"(?<=[.!?])\s+", text)
 
         chunk_paths = []
@@ -512,26 +434,26 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
 
     # Continue with chunking logic as before
     corpus_paths = chunk_corpus_by_tokens(corpus_path, output_dir, tokenizer)
-    
+
     # Create datasets from chunks using the clamped dataset class
-    print(f"Creating clamped datasets from {len(corpus_paths)} chunks with block_size={block_size}...")
-    
+    print(
+        f"Creating clamped datasets from {len(corpus_paths)} chunks with block_size={block_size}..."
+    )
+
     datasets = []
     for chunk_path in corpus_paths:
         try:
-            # Use our custom ClampedTextDataset
             chunk_dataset = ClampedTextDataset(
                 file_path=chunk_path,
                 tokenizer=tokenizer,
                 block_size=block_size,
-                vocab_size=vocab_size
+                vocab_size=vocab_size,
             )
-            
+
             if len(chunk_dataset) > 0:
                 datasets.append(chunk_dataset)
-                print(f"Added dataset with {len(chunk_dataset)} examples")
             else:
-                print(f"Skipping empty dataset from {chunk_path}")
+                print(f"Warning: Skipping empty dataset from {chunk_path}")
         except Exception as e:
             print(f"Error creating dataset from {chunk_path}: {str(e)}")
             print("Skipping this chunk and continuing")
@@ -542,17 +464,14 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
     # Combine datasets if needed
     if len(datasets) > 1:
         from torch.utils.data import ConcatDataset
+
         dataset = ConcatDataset(datasets)
         print(f"Combined dataset created with {len(dataset)} total examples")
     else:
         dataset = datasets[0]
         print(f"Using single dataset with {len(dataset)} examples")
 
-    # Use our custom clamped data collator
-    data_collator = ClampedDataCollator(
-        tokenizer=tokenizer,
-        vocab_size=vocab_size
-    )
+    data_collator = ClampedDataCollator(tokenizer=tokenizer, vocab_size=vocab_size)
 
     # Set up training arguments
     training_args = TrainingArguments(
@@ -567,7 +486,7 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
         debug="underflow_overflow",
         logging_steps=10,
     )
-    
+
     # Set use_cpu=True based on device
     if device == "cpu":
         training_args.use_cpu = True
@@ -592,11 +511,13 @@ def train_latin_model(corpus_path, output_dir, epochs, block_size=128, force_cpu
     # Using only the first vocab_size tokens from the original vocabulary
     full_vocab = tokenizer.get_vocab()
     sorted_vocab = sorted(full_vocab.items(), key=lambda x: x[1])
-    limited_vocab = {token: idx for idx, (token, _) in enumerate(sorted_vocab[:vocab_size])}
-    
+    limited_vocab = {
+        token: idx for idx, (token, _) in enumerate(sorted_vocab[:vocab_size])
+    }
+
     with open(f"{output_dir}/latin_vocab.json", "w") as f:
         json.dump(limited_vocab, f)
-    
+
     print(f"Saved limited vocabulary with {len(limited_vocab)} tokens")
 
     return model, tokenizer
@@ -774,7 +695,10 @@ def main():
     diagnose_system()
 
     # Set up argument parser
-    parser = argparse.ArgumentParser(description='Latin Language Model Training Pipeline')
+    parser = argparse.ArgumentParser(
+        description="Latin Language Model Training Pipeline"
+    )
+    # fmt: off
     parser.add_argument('--corpus', type=str, help='Path to the raw Latin corpus file')
     parser.add_argument('--output', type=str, default='./output_model', help='Output directory for model files')
     parser.add_argument('--clean-only', action='store_true', help='Only clean the corpus without training')
@@ -789,7 +713,7 @@ def main():
     parser.add_argument('--num-heads', type=int, default=4, help='Number of attention heads for model reduction')
     parser.add_argument('--num-layers', type=int, default=4, help='Number of transformer layers')
     parser.add_argument('--context-size', type=int, default=256, help='Maximum context window size')
-    
+    # fmt: on
     args = parser.parse_args()
 
     # Create output directories
@@ -849,7 +773,7 @@ def main():
                 hidden_size=args.hidden_size,
                 num_heads=args.num_heads,
                 num_layers=args.num_layers,
-                context_size=args.context_size
+                context_size=args.context_size,
             )
         except ValueError as e:
             print(f"Error during model training: {str(e)}")
@@ -866,7 +790,7 @@ def main():
                     hidden_size=args.hidden_size,
                     num_heads=args.num_heads,
                     num_layers=args.num_layers,
-                    context_size=args.context_size
+                    context_size=args.context_size,
                 )
 
     # Step 4: Export to CoreML
