@@ -4,7 +4,7 @@ A transformer based next-word prediction model for Latin language autocorrect on
 
 ## Overview
 
-This model training pipeline can be run on a large corpus of Latin text (ISO 639-1 Lanugage Code `'la'`, _Latinum_). The pipeline has several stages
+This model training pipeline can be run on a large corpus of Latin text (ISO 639-1 Language Code `'la'`, _Latinum_). The pipeline has several stages
 
 1. Check system capabilities (CUDA, MPS availability)
 2. Clean Latin text dataset
