@@ -55,7 +55,7 @@ This creates a virtual environment, installs dependencies, and runs the training
 To run the Python script directly with custom options:
 
 ```bash
-python latin_language_model.py --corpus "../LatinTextDataset/latincorpus.txt" --epochs 4 --vocab-size 12000
+python latin_language_model.py --corpus "../LatinTextDataset/latincorpus.txt" --epochs 4 --vocab-size 24000
 ```
 
 ## Key Options
@@ -63,7 +63,7 @@ python latin_language_model.py --corpus "../LatinTextDataset/latincorpus.txt" --
 - `--corpus`: Path to the raw Latin corpus file
 - `--output`: Output directory (default: `./output_model`)
 - `--epochs`: Number of training epochs (default: 4)
-- `--vocab-size`: Max vocabulary size (default: 12000)
+- `--vocab-size`: Max vocabulary size (default: 24000)
 - `--hidden-size`: Hidden size for model reduction (default: 256)
 - `--num-heads`: Number of attention heads (default: 4)
 - `--num-layers`: Number of transformer layers (default: 4)

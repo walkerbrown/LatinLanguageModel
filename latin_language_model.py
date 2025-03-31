@@ -708,7 +708,7 @@ def main():
     parser.add_argument('--model-name', type=str, default='LatinTransformer', help='Name for the final CoreML model')
     parser.add_argument('--block-size', type=int, default=64, help='Block size for dataset creation (balanced for stability)')
     parser.add_argument('--force-cpu', action='store_true', help='Force the use of CPU even if GPU is available')
-    parser.add_argument('--vocab-size', type=int, default=12000, help='Max vocabulary size for model reduction')
+    parser.add_argument('--vocab-size', type=int, default=24000, help='Max vocabulary size for model reduction')
     parser.add_argument('--hidden-size', type=int, default=256, help='Hidden size for model reduction')
     parser.add_argument('--num-heads', type=int, default=4, help='Number of attention heads for model reduction')
     parser.add_argument('--num-layers', type=int, default=4, help='Number of transformer layers')
